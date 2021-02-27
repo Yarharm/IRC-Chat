@@ -2,6 +2,8 @@ import socket
 import select
 import sys
 import logging
+import commands
+import constants
 
 class Client:
     def __init__(self, addr):
@@ -20,6 +22,7 @@ class Server:
         self.clients = {} # socket -> Client
         self.buffer = {} # socket -> message str
         self.logger = None
+        self.encoding = 'utf-8'
 
     def __init_logger(self):
         logging.basicConfig(filename='log-server.log', filemode='w+', level=logging.DEBUG)
@@ -56,7 +59,6 @@ class Server:
 
     def __close_client_connection(self, client_socket):
         addr = self.__get_client_addr(client_socket)
-        self.logger.info(f'Attempting to close connection with {addr}')
         self.input_sources.remove(client_socket)
         self.output_sources.remove(client_socket)
         self.clients.pop(client_socket, 'OK')
@@ -64,10 +66,37 @@ class Server:
         client_socket.close()
         self.logger.info(f'Closed client connection with address {addr}')
     
-    def __register_message(self, client_socket, msg):
-        self.buffer[client_socket] += msg
-        self.logger.info(f'Received message "{msg}" from client with address {self.__get_client_addr(client_socket)}')
-    
+    # Register message in the buffer
+    def __register_request(self, client_socket, request):
+        self.buffer[client_socket] += request
+        self.logger.info(f'Received request {repr(request)} from client with address {self.__get_client_addr(client_socket)}')
+
+    # Generate message response 
+    def __process_request(self, client_socket, buffered_request):
+        if constants.MESSAGE_END_DELIM not in buffered_request:
+            self.logger.info(f'Request "{buffered_request}" does not contain CR-LF termination. Postponing processing!')
+            return
+
+        # Get request from buffer
+        request_delim = buffered_request.index(constants.MESSAGE_END_DELIM)
+        request = buffered_request[:request_delim]
+        self.buffer[client_socket] = buffered_request[request_delim + len(constants.MESSAGE_END_DELIM):] # update buffer
+
+        # Request processing
+        self.logger.info(f'Processing request "{request}" from client with address {self.__get_client_addr(client_socket)}')
+        request_split = request.split(' ')
+        command_type = request_split[1] if constants.PREFIX_DELIM in request_split[0] else request_split[0]
+        nick_shift = 1 if constants.PREFIX_DELIM in request_split[0] else 0
+
+        response = ""
+        if command_type == commands.BROADCAST:
+            _channel, msg = request_split[1 + nick_shift], request_split[2 + nick_shift]
+            response = f'{msg[1:]}{constants.MESSAGE_END_DELIM}'
+            for channel_member in self.output_sources:
+                self.logger.info(f'Sending response {repr(response)} to the client address {self.__get_client_addr(channel_member)}')
+                client_socket.sendall(response.encode(self.encoding))
+        
+
     # Main event loop
     def run(self):
         while True:
@@ -79,37 +108,33 @@ class Server:
                     if read_socket == self.socket:
                         self.__accept_client_connection()
                     else:
-                        msg = read_socket.recv(4096).decode('utf-8')
-                        if msg:
-                            self.__register_message(read_socket, msg)
+                        request = read_socket.recv(4096).decode(self.encoding)
+                        if request:
+                            self.__register_request(read_socket, request)
                         else:
-                            self.logger.warn('Bad boy 1')
+                            self.logger.warning('Client disconnected. Closing connection from __read_sockets__')
                             self.__close_client_connection(read_socket)
             
                 # Handle write sockets
                 # Bug is connection is closed in __read_sockets__ then buffer does not exists event if message is there
                 for write_socket in write_sockets:
-                    msg = self.buffer[write_socket] if write_socket in self.buffer else ''
-                    if msg:
-                        # Broadcast
-                        for client_socket in self.output_sources:
-                            self.logger.info(f'Sending message "{msg}" to the client address {self.__get_client_addr(client_socket)}')
-                            client_socket.sendall(msg.encode('utf-8'))
-                        self.buffer[write_socket] = ''
+                    buffered_request = self.buffer[write_socket] if write_socket in self.buffer else ''
+                    if buffered_request:
+                        self.__process_request(write_socket, buffered_request)
             
                 # Handle error sockets
                 for err_socket in err_sockets:
-                    self.logger.warn('Some socket is broken in err_sockets')
+                    self.logger.warning('Closing connection from __err_sockets__')
                     self.__close_client_connection(err_socket)
 
             except socket.error as e:
-                self.logger.warn(f'Client exited abruptly with error name {type(e).__name__} and message {e}')
+                self.logger.warning(f'Client exited abruptly with error name {type(e).__name__} and message {e}')
                 self.__remove_dead_connections()
                 # self.logger.info(f'Run event 1 {type(e).__name__}')
                 # self.logger.info(f'Run event 2 {e.__class__.__name__}')
                 # self.logger.info(f'Run event 3 {e.__class__.__qualname__}'
             except KeyError as e:
-                self.logger.warn(f'Server has messed dictionary keys. Error name {type(e).__name__} and message {e}')
+                self.logger.warning(f'Server has messed up dictionary keys. Error name {type(e).__name__} and message {e}')
             
     # Prepare server
     def coldstart(self):
