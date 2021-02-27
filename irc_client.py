@@ -19,23 +19,44 @@ import queue
 import patterns
 import view
 import sys
+import commands
+import constants
 
-logging.basicConfig(filename='view.log', filemode='w', level=logging.DEBUG)
+logging.basicConfig(filename='log-client.log', filemode='w+', level=logging.DEBUG)
 logger = logging.getLogger()
+
+class RequestBuilder:
+    def __init__(self):
+        self.global_channel = '#global'
+        self.encoding = 'utf-8'
+
+    def build(self, msg, request_type, prefix=''):
+        request = ""
+
+        if request_type == commands.BROADCAST:
+            request = f'{commands.BROADCAST} {self.global_channel} :{msg}'
+            request = f':{prefix} {request}' if prefix else request
+
+        request += constants.MESSAGE_END_DELIM
+        logger.info(f'RequestBuilder prepared request {repr(request)}')
+        return request.encode(self.encoding)
 
 class IRCClient(patterns.Subscriber):
     def __init__(self, host, port):
         super().__init__()
-        self.username = str()
+        self.nick = ''
         self._run = True
         self.host = host
         self.port = port
         self.socket = None
-        self.input_sources = [] # Sockets client reads from
+        self.request_builder = RequestBuilder()
 
     def set_view(self, view):
         self.view = view
     
+    def add_msg(self, msg):
+        self.view.add_msg(self.nick, msg)
+
     def init_tcp_connection(self):
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.connect((self.host, self.port))
@@ -52,19 +73,18 @@ class IRCClient(patterns.Subscriber):
         self.process_input(msg)
 
     def process_input(self, msg):
+        request = ""
         if msg.lower().startswith('/quit'):
             raise KeyboardInterrupt
-        # elif msg.lower().startswith('/nick'):
-        #     print(f'HERE {msg}')
-        #     display_output = self.client.register_nickname(msg.split(' ')[-1])
-        # elif msg.lower().startswith('/user'):
-        #     display_output = self.client.register_username(msg.split(' ')[-1])
-        logger.info(f'Sending message: {msg}')
-        self.socket.sendall(msg.encode('utf-8'))
+        elif msg.lower().startswith('/nick'):
+            request = self.request_builder.build(msg, commands.NICKNAME)
+        elif msg.lower().startswith('/user'):
+            request = self.request_builder.build(msg, commands.USERNAME)
+        else:
+            request = self.request_builder.build(msg, commands.BROADCAST, self.nick)
         
-
-    def add_msg(self, msg):
-        self.view.add_msg(self.username, msg)
+        logger.info(f'Sending request {repr(request)}')
+        self.socket.sendall(request)
     
     # Listen for server input
     def run(self):
@@ -80,12 +100,16 @@ class IRCClient(patterns.Subscriber):
                 # Receive messages from the server
                 if read_sockets:
                     data = self.socket.recv(4096).decode('utf-8')
+                    if constants.MESSAGE_END_DELIM not in data:
+                        logger.warning('Server response does not contain CR-LF termination')
                     if data:
-                        logger.info(f'Thread: Client received message from the server "{data}"')
+                        logger.info(f'Client received message from the server {repr(data)}')
+                        data = data[:data.index(constants.MESSAGE_END_DELIM)]
+                        logger.info(f'Displaying response {data}')
                         self.add_msg(data)
 
         except Exception as e:
-            logger.info(f'Thread: ERR {e}')
+            logger.warning(f'Thread: Listening Error {e}')
         
 
     def close(self):
@@ -117,7 +141,7 @@ def main(args):
         client.init_tcp_connection()
     except ConnectionRefusedError:
         conn_err = f'Server is not listening on {host}:{port}'
-        logger.info(conn_err)
+        logger.warning(conn_err)
         print(conn_err)
         sys.exit()
 

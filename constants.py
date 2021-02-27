@@ -1,0 +1,2 @@
+MESSAGE_END_DELIM = '\r\n'
+PREFIX_DELIM = ':'
