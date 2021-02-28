@@ -12,7 +12,7 @@ import pathlib
 
 import patterns
 
-logging.basicConfig(filename='view.log', level=logging.DEBUG)
+logging.basicConfig(filename='view.log', filemode='w+', level=logging.DEBUG)
 logger = logging.getLogger()
 
 
