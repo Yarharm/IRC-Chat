@@ -26,20 +26,20 @@ logging.basicConfig(filename='log-client.log', filemode='w+', level=logging.DEBU
 logger = logging.getLogger()
 
 class RequestBuilder:
-    def __init__(self):
-        self.global_channel = '#global'
-        self.encoding = 'utf-8'
-
     def build(self, msg, request_type, prefix=''):
         request = ""
 
         if request_type == commands.BROADCAST:
-            request = f'{commands.BROADCAST} {self.global_channel} :{msg}'
-            request = f':{prefix} {request}' if prefix else request
+            request = f'{commands.BROADCAST} {constants.GLOBAL_CHANNEL} {constants.COMMAND_MESSAGE_DELIM}{msg}'
+            request = f'{constants.COMMAND_PREFIX_DELIM}{prefix} {request}' if prefix else request
+        elif request_type == commands.NICKNAME:
+            nickname = msg[msg.index(constants.UI_NICK) + len(constants.UI_NICK):]
+            request = f'{commands.NICKNAME} {nickname}'
+            request = f'{constants.COMMAND_PREFIX_DELIM}{prefix} {request}' if prefix else request
 
-        request += constants.MESSAGE_END_DELIM
+        request += constants.COMMAND_END_DELIM
         logger.info(f'RequestBuilder prepared request {repr(request)}')
-        return request.encode(self.encoding)
+        return request.encode(constants.COMMAND_ENCODING)
 
 class IRCClient(patterns.Subscriber):
     def __init__(self, host, port):
@@ -74,11 +74,11 @@ class IRCClient(patterns.Subscriber):
 
     def process_input(self, msg):
         request = ""
-        if msg.lower().startswith('/quit'):
+        if msg.lower().startswith(constants.UI_QUIT):
             raise KeyboardInterrupt
-        elif msg.lower().startswith('/nick'):
-            request = self.request_builder.build(msg, commands.NICKNAME)
-        elif msg.lower().startswith('/user'):
+        elif msg.lower().startswith(constants.UI_NICK):
+            request = self.request_builder.build(msg, commands.NICKNAME, self.nick)
+        elif msg.lower().startswith(constants.UI_USER):
             request = self.request_builder.build(msg, commands.USERNAME)
         else:
             request = self.request_builder.build(msg, commands.BROADCAST, self.nick)
@@ -99,14 +99,17 @@ class IRCClient(patterns.Subscriber):
             
                 # Receive messages from the server
                 if read_sockets:
-                    data = self.socket.recv(4096).decode('utf-8')
-                    if constants.MESSAGE_END_DELIM not in data:
-                        logger.warning('Server response does not contain CR-LF termination')
-                    if data:
-                        logger.info(f'Client received message from the server {repr(data)}')
-                        data = data[:data.index(constants.MESSAGE_END_DELIM)]
-                        logger.info(f'Displaying response {data}')
-                        self.add_msg(data)
+                    server_message = self.socket.recv(4096).decode(constants.COMMAND_ENCODING)
+                    # FIT HERE: BUFFER RECEIVED DATA JUST LIKE ON THE SERVER
+                    if constants.COMMAND_END_DELIM not in server_message:
+                        logger.warning('Server message does not contain CR-LF termination')
+                    if server_message:
+                        logger.info(f'Client received message from the server {repr(server_message)}')
+                        server_message = server_message[:server_message.index(constants.COMMAND_END_DELIM)]
+                        if constants.COMMAND_NICK_REGISTER_SUCCESS in server_message or constants.COMMAND_NICK_CHANGE_SUCCESS in server_message:
+                            self.nick = server_message[server_message.index('"') + 1:server_message.rindex('"')]
+                        logger.info(f'Displaying response "{server_message}"')
+                        self.add_msg(server_message)
 
         except Exception as e:
             logger.warning(f'Thread: Listening Error {e}')

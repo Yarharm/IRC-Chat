@@ -4,14 +4,45 @@ import sys
 import logging
 import commands
 import constants
+import errors
+from util_server import ServerUtil
 
+"""
+Description:
+
+Client object encapsulation
+
+"""
 class Client:
     def __init__(self, addr):
         self.addr = addr
+        self.nickname = ''
+        self.username = ''
+    
+    # Set nickname and username
+    # Return True if user is registered; False otherwise
+    def register(self, property_value, property_type):
+        if property_type == commands.NICKNAME:
+            self.nickname = property_value
+        if property_type == commands.USERNAME:
+            self.username = property_value
+        return self.nickname and self.username
+    
+    def get_nickname(self):
+        return self.nickname
+
+    def get_username(self):
+        return self.username
 
     def get_addr(self):
         return self.addr
 
+"""
+Description:
+
+IRC Server
+
+"""
 class Server:
     def __init__(self):
         self.host = '127.0.0.1'
@@ -19,10 +50,10 @@ class Server:
         self.socket = None
         self.input_sources = list()
         self.output_sources = list()
-        self.clients = {} # socket -> Client
-        self.buffer = {} # socket -> message str
+        self.clients = dict() # socket -> Client
+        self.nicknames = set()
+        self.buffer = dict() # socket -> message str
         self.logger = None
-        self.encoding = 'utf-8'
 
     def __init_logger(self):
         logging.basicConfig(filename='log-server.log', filemode='w+', level=logging.DEBUG)
@@ -43,6 +74,12 @@ class Server:
     def __get_client_addr(self, client_socket):
         return self.clients[client_socket].get_addr() if client_socket in self.clients else 'Address no longer available'
 
+    def __get_client_nickname(self, client_socket):
+        return self.clients[client_socket].get_nickname() if client_socket in self.clients else ''
+
+    def __remove_nickname(self, client_socket):
+        self.nicknames.discard(self.__get_client_nickname(client_socket))
+
     def __remove_dead_connections(self):
         for client_socket in self.input_sources:
             if client_socket.fileno() == -1:
@@ -61,6 +98,7 @@ class Server:
         addr = self.__get_client_addr(client_socket)
         self.input_sources.remove(client_socket)
         self.output_sources.remove(client_socket)
+        self.__remove_nickname(client_socket)
         self.clients.pop(client_socket, 'OK')
         self.buffer.pop(client_socket, 'OK')
         client_socket.close()
@@ -70,31 +108,69 @@ class Server:
     def __register_request(self, client_socket, request):
         self.buffer[client_socket] += request
         self.logger.info(f'Received request {repr(request)} from client with address {self.__get_client_addr(client_socket)}')
+    
+    # Handle broadcast request
+    def __handle_broadcast(self, client_socket, request):
+        response_message = ServerUtil.get_broadcast_message(request)
+        response = ServerUtil.build_response(response_message)
+        for channel_member in self.output_sources:
+            self.logger.info(f'Sending response {repr(response)} to the client address {self.__get_client_addr(channel_member)}')
+            channel_member.sendall(response)
+        
+    # Handle nickname request
+    def __handle_nickname(self, client_socket, request):
+        nickname = ServerUtil.get_nickname_message(request)
+        response_message = ''
+        if not nickname:
+            self.logger.warning('Nickname parameter was not found. Responding with "431 ERR_NONICKNAMEGIVEN"')
+            response_message = f'{errors.ERR_NONICKNAMEGIVEN_CODE} {errors.ERR_NONICKNAMEGIVEN_MESSAGE}'
+        elif len(nickname) > 9:
+            self.logger.warning(f'Nickname "{nickname}"" is too long. Responding with "432 ERR_ERRONEUSNICKNAME"')
+            response_message = f'{errors.ERR_ERRONEUSNICKNAME_CODE} {nickname} {errors.ERR_ERRONEUSNICKNAME_MESSAGE}'
+        elif nickname in self.nicknames and self.__get_client_nickname(client_socket):
+            self.logger.warning(f'Cannot change! Nickname "{nickname}" is already in use. Responding with "433 ERR_NICKNAMEINUSE"')
+            response_message = f'{errors.ERR_NICKNAMEINUSE_CODE} {nickname} {errors.ERR_NICKNAMEINUSE_MESSAGE}'
+        elif nickname in self.nicknames:
+            self.logger.warning(f'Cannot register! Nickname "{nickname}" collision. Responding with "436 ERR_NICKCOLLISION"')
+            response_message = f'{errors.ERR_NICKCOLLISION_CODE} {nickname} {errors.ERR_NICKCOLLISION_MESSAGE}'
+        else:
+            old_nickname = self.__get_client_nickname(client_socket)
+            # Client already had nickname
+            if old_nickname:
+                self.__remove_nickname(client_socket)
+                self.logger.info(f'Successfully changed "{old_nickname}" nickname to "{nickname}" for the client {self.__get_client_addr(client_socket)}')
+                response_message = f'{old_nickname} {constants.COMMAND_NICK_CHANGE_SUCCESS} "{nickname}".'
+            # New client nickname registration
+            else:
+                self.logger.info(f'Successfuly registered nickname "{nickname}" for the client {self.__get_client_addr(client_socket)}')
+                response_message = f'{constants.COMMAND_NICK_REGISTER_SUCCESS} "{nickname}".'
+
+            self.nicknames.add(nickname)
+            _registered = self.clients[client_socket].register(nickname, commands.NICKNAME)
+            # if registered:
+            #     self.output_sources.append(client_socket) # FIX IT: ADD TO OUTPUT SOURCES ONLY ONCE
+        response = ServerUtil.build_response(response_message)
+        self.logger.info(f'Sending NICK command result to the client {repr(response)}')
+        client_socket.sendall(response)
 
     # Generate message response 
     def __process_request(self, client_socket, buffered_request):
-        if constants.MESSAGE_END_DELIM not in buffered_request:
+        if constants.COMMAND_END_DELIM not in buffered_request:
             self.logger.info(f'Request "{buffered_request}" does not contain CR-LF termination. Postponing processing!')
             return
 
         # Get request from buffer
-        request_delim = buffered_request.index(constants.MESSAGE_END_DELIM)
-        request = buffered_request[:request_delim]
-        self.buffer[client_socket] = buffered_request[request_delim + len(constants.MESSAGE_END_DELIM):] # update buffer
+        request, request_delim = ServerUtil.get_request_from_buffer(buffered_request)
+        self.buffer[client_socket] = buffered_request[request_delim:] # update buffer
 
         # Request processing
-        self.logger.info(f'Processing request "{request}" from client with address {self.__get_client_addr(client_socket)}')
-        request_split = request.split(' ')
-        command_type = request_split[1] if constants.PREFIX_DELIM in request_split[0] else request_split[0]
-        nick_shift = 1 if constants.PREFIX_DELIM in request_split[0] else 0
-
-        response = ""
+        self.logger.info(f'Processing request {repr(request)} from client with address {self.__get_client_addr(client_socket)}')
+        command_type = ServerUtil.get_command_type(request)
+        # FIX HERE: IF NICKNAME IS ATTACHED VERIFY THAT IT IS ACTUALLY REGISTERED WITH THE SERVER
         if command_type == commands.BROADCAST:
-            _channel, msg = request_split[1 + nick_shift], request_split[2 + nick_shift]
-            response = f'{msg[1:]}{constants.MESSAGE_END_DELIM}'
-            for channel_member in self.output_sources:
-                self.logger.info(f'Sending response {repr(response)} to the client address {self.__get_client_addr(channel_member)}')
-                client_socket.sendall(response.encode(self.encoding))
+            self.__handle_broadcast(client_socket, request)
+        elif command_type == commands.NICKNAME:
+            self.__handle_nickname(client_socket, request)
         
 
     # Main event loop
@@ -108,7 +184,7 @@ class Server:
                     if read_socket == self.socket:
                         self.__accept_client_connection()
                     else:
-                        request = read_socket.recv(4096).decode(self.encoding)
+                        request = read_socket.recv(4096).decode(constants.COMMAND_ENCODING)
                         if request:
                             self.__register_request(read_socket, request)
                         else:
@@ -133,8 +209,6 @@ class Server:
                 # self.logger.info(f'Run event 1 {type(e).__name__}')
                 # self.logger.info(f'Run event 2 {e.__class__.__name__}')
                 # self.logger.info(f'Run event 3 {e.__class__.__qualname__}'
-            except KeyError as e:
-                self.logger.warning(f'Server has messed up dictionary keys. Error name {type(e).__name__} and message {e}')
             
     # Prepare server
     def coldstart(self):
@@ -144,7 +218,7 @@ class Server:
     
     # Close resources
     def shutdown(self, e):
-        self.logger.info(f'Shutting down with err: {e}')
+        self.logger.info(f'Shutting down with error name {type(e).__name__} and message {e}')
         for client_socket in self.input_sources:
                     if client_socket.fileno() == -1:
                         self.__close_client_connection(client_socket)
