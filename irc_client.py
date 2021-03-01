@@ -29,12 +29,17 @@ class RequestBuilder:
     def build(self, msg, request_type, prefix=''):
         request = ""
 
-        if request_type == commands.BROADCAST:
-            request = f'{commands.BROADCAST} {constants.GLOBAL_CHANNEL} {constants.COMMAND_MESSAGE_DELIM}{msg}'
-            request = f'{constants.COMMAND_PREFIX_DELIM}{prefix} {request}' if prefix else request
-        elif request_type == commands.NICKNAME:
-            nickname = msg[msg.index(constants.UI_NICK) + len(constants.UI_NICK):]
+        if request_type == commands.NICKNAME:
+            nickname = msg[msg.index(constants.UI_NICK) + len(constants.UI_NICK):].strip()
             request = f'{commands.NICKNAME} {nickname}'
+            request = f'{constants.COMMAND_PREFIX_DELIM}{prefix} {request}' if prefix else request
+        elif request_type == commands.USERNAME:
+            username = msg[msg.index(constants.UI_USER) + len(constants.UI_USER):].strip()
+            hostname = 'hostname'
+            servername = 'servername'
+            request = f'{commands.USERNAME} {username} {hostname} {servername} {constants.COMMAND_REALNAME_DELIM}{username}'
+        else:
+            request = f'{commands.BROADCAST} {constants.GLOBAL_CHANNEL} {constants.COMMAND_MESSAGE_DELIM}{msg}'
             request = f'{constants.COMMAND_PREFIX_DELIM}{prefix} {request}' if prefix else request
 
         request += constants.COMMAND_END_DELIM
@@ -50,6 +55,7 @@ class IRCClient(patterns.Subscriber):
         self.port = port
         self.socket = None
         self.request_builder = RequestBuilder()
+        self.buffer = ''
 
     def set_view(self, view):
         self.view = view
@@ -63,11 +69,9 @@ class IRCClient(patterns.Subscriber):
         self.socket.setblocking(0)
 
     def update(self, msg):
-        # Will need to modify this
         if not isinstance(msg, str):
             raise TypeError(f"Update argument needs to be a string")
         elif not len(msg):
-            # Empty string
             return
         logger.info(f"IRCClient.update -> msg: {msg}")
         self.process_input(msg)
@@ -99,11 +103,15 @@ class IRCClient(patterns.Subscriber):
             
                 # Receive messages from the server
                 if read_sockets:
-                    server_message = self.socket.recv(4096).decode(constants.COMMAND_ENCODING)
-                    # FIT HERE: BUFFER RECEIVED DATA JUST LIKE ON THE SERVER
-                    if constants.COMMAND_END_DELIM not in server_message:
-                        logger.warning('Server message does not contain CR-LF termination')
-                    if server_message:
+                    data = self.socket.recv(4096).decode(constants.COMMAND_ENCODING)
+                    self.buffer += data
+                    if constants.COMMAND_END_DELIM not in self.buffer:
+                        logger.warning('Buffer does not contain CR-LF termination. Processing later.')
+                    else:
+                        message_delim = self.buffer.index(constants.COMMAND_END_DELIM) + len(constants.COMMAND_END_DELIM)
+                        server_message = self.buffer[:message_delim]
+                        self.buffer = self.buffer[message_delim:] # update buffer
+
                         logger.info(f'Client received message from the server {repr(server_message)}')
                         server_message = server_message[:server_message.index(constants.COMMAND_END_DELIM)]
                         if constants.COMMAND_NICK_REGISTER_SUCCESS in server_message or constants.COMMAND_NICK_CHANGE_SUCCESS in server_message:
