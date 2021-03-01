@@ -20,12 +20,13 @@ class Client:
         self.username = ''
     
     # Set nickname and username
-    # Return True if user is registered; False otherwise
     def register(self, property_value, property_type):
         if property_type == commands.NICKNAME:
             self.nickname = property_value
         if property_type == commands.USERNAME:
             self.username = property_value
+    
+    def registration_status(self):
         return self.nickname and self.username
     
     def get_nickname(self):
@@ -76,6 +77,12 @@ class Server:
 
     def __get_client_nickname(self, client_socket):
         return self.clients[client_socket].get_nickname() if client_socket in self.clients else ''
+    
+    def __get_client_username(self, client_socket):
+        return self.clients[client_socket].get_username() if client_socket in self.clients else ''
+    
+    def __get_client_registration_status(self, client_socket):
+        return self.clients[client_socket].registration_status() if client_socket in self.clients else False
 
     def __remove_nickname(self, client_socket):
         self.nicknames.discard(self.__get_client_nickname(client_socket))
@@ -112,14 +119,31 @@ class Server:
     # Handle broadcast request
     def __handle_broadcast(self, client_socket, request):
         response_message = ServerUtil.get_broadcast_message(request)
+        client_nickname = self.__get_client_nickname(client_socket)
+        client_username = self.__get_client_username(client_socket)
+        
+        # No registered Nickname
+        if client_nickname not in self.nicknames or not client_nickname:
+            self.logger.warning(f'Client broadcast denided, no such NICK. Responding with "401 ERR_NOSUCHNICK"')
+            response_message = f'{errors.ERR_NOSUCHNICK_CODE} {client_nickname} {errors.ERR_NOSUCHNICK_MESSAGE}'
+        # No registered Username
+        elif not client_username:
+            self.logger.warning(f'Client broadcast denided, no such USER. Responding with "404 ERR_CANNOTSENDTOCHAN"')
+            response_message = f'{errors.ERR_CANNOTSENDTOCHAN_CODE} {constants.GLOBAL_CHANNEL} {errors.ERR_CANNOTSENDTOCHAN_MESSAGE}'
+        # Execute broadcast
+        else:
+            response = ServerUtil.build_response(response_message)
+            for channel_member in self.output_sources:
+                if channel_member != client_socket and self.__get_client_registration_status(channel_member):
+                    self.logger.info(f'Sending broadcast {repr(response)} to the client address {self.__get_client_addr(channel_member)}')
+                    channel_member.sendall(response)
         response = ServerUtil.build_response(response_message)
-        for channel_member in self.output_sources:
-            self.logger.info(f'Sending response {repr(response)} to the client address {self.__get_client_addr(channel_member)}')
-            channel_member.sendall(response)
+        self.logger.info(f'Sending broadcast {repr(response)} to the original sender {self.__get_client_addr(client_socket)}')
+        client_socket.sendall(response)
         
     # Handle nickname request
     def __handle_nickname(self, client_socket, request):
-        nickname = ServerUtil.get_nickname_message(request)
+        nickname = ServerUtil.get_nick_nickname(request)
         response_message = ''
         if not nickname:
             self.logger.warning('Nickname parameter was not found. Responding with "431 ERR_NONICKNAMEGIVEN"')
@@ -142,16 +166,35 @@ class Server:
                 response_message = f'{old_nickname} {constants.COMMAND_NICK_CHANGE_SUCCESS} "{nickname}".'
             # New client nickname registration
             else:
-                self.logger.info(f'Successfuly registered nickname "{nickname}" for the client {self.__get_client_addr(client_socket)}')
+                self.logger.info(f'Successfully registered nickname "{nickname}" for the client {self.__get_client_addr(client_socket)}')
                 response_message = f'{constants.COMMAND_NICK_REGISTER_SUCCESS} "{nickname}".'
 
             self.nicknames.add(nickname)
-            _registered = self.clients[client_socket].register(nickname, commands.NICKNAME)
-            # if registered:
-            #     self.output_sources.append(client_socket) # FIX IT: ADD TO OUTPUT SOURCES ONLY ONCE
+            self.clients[client_socket].register(nickname, commands.NICKNAME)
         response = ServerUtil.build_response(response_message)
         self.logger.info(f'Sending NICK command result to the client {repr(response)}')
         client_socket.sendall(response)
+
+    def __handle_username(self, client_socket, request):
+        response_message = ''
+        # Not valid paramters cound
+        if not ServerUtil.user_valid_params(request):
+            self.logger.warning(f'USER request {repr(request)} does not have enough paramteres. Responsing with "461 ERR_NEEDMOREPARAMS"')
+            response_message = f'{errors.ERR_NEEDMOREPARAMS_CODE} {commands.USERNAME} {errors.ERR_NEEDMOREPARAMS_MESSAGE}'
+        # Reregistration process
+        elif self.__get_client_username(client_socket):
+            self.logger.warning(f'USER request already registered. Responding with "462 ERR_ALREADYREGISTRED"')
+            response_message = f'{errors.ERR_ALREADYREGISTRED_CODE} {errors.ERR_ALREADYREGISTRED_MESSAGE}'
+        # Register username. No response sent to the client
+        else:
+            username = ServerUtil.get_user_username(request)
+            self.clients[client_socket].register(username, commands.USERNAME)
+            self.logger.info(f'Successfully registered username "{username}" for the client {self.__get_client_addr(client_socket)}')
+            return
+        response = ServerUtil.build_response(response_message)
+        self.logger.info(f'Sending USER command result to the client {repr(response)}')
+        client_socket.sendall(response)
+        
 
     # Generate message response 
     def __process_request(self, client_socket, buffered_request):
@@ -166,11 +209,12 @@ class Server:
         # Request processing
         self.logger.info(f'Processing request {repr(request)} from client with address {self.__get_client_addr(client_socket)}')
         command_type = ServerUtil.get_command_type(request)
-        # FIX HERE: IF NICKNAME IS ATTACHED VERIFY THAT IT IS ACTUALLY REGISTERED WITH THE SERVER
-        if command_type == commands.BROADCAST:
-            self.__handle_broadcast(client_socket, request)
-        elif command_type == commands.NICKNAME:
+        if command_type == commands.NICKNAME:
             self.__handle_nickname(client_socket, request)
+        elif command_type == commands.USERNAME:
+            self.__handle_username(client_socket, request)
+        else:
+            self.__handle_broadcast(client_socket, request)
         
 
     # Main event loop
@@ -206,9 +250,6 @@ class Server:
             except socket.error as e:
                 self.logger.warning(f'Client exited abruptly with error name {type(e).__name__} and message {e}')
                 self.__remove_dead_connections()
-                # self.logger.info(f'Run event 1 {type(e).__name__}')
-                # self.logger.info(f'Run event 2 {e.__class__.__name__}')
-                # self.logger.info(f'Run event 3 {e.__class__.__qualname__}'
             
     # Prepare server
     def coldstart(self):
@@ -220,8 +261,8 @@ class Server:
     def shutdown(self, e):
         self.logger.info(f'Shutting down with error name {type(e).__name__} and message {e}')
         for client_socket in self.input_sources:
-                    if client_socket.fileno() == -1:
-                        self.__close_client_connection(client_socket)
+            if client_socket.fileno() == -1:
+                self.__close_client_connection(client_socket)
         if self.socket is not None:
             self.socket.close()
 
