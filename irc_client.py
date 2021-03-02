@@ -90,6 +90,16 @@ class IRCClient(patterns.Subscriber):
         logger.info(f'Sending request {repr(request)}')
         self.socket.sendall(request)
     
+    def __process_server_message(self, server_message):
+        # Process optional prefix
+        prefix_start = server_message.find(constants.COMMAND_PREFIX_DELIM)
+        prefix_end = server_message.index(' ')
+        prefix = server_message[prefix_start + 1: prefix_end] if prefix_start != -1 else ''
+        self.nick = prefix
+        # Process message
+        message = server_message[prefix_end:server_message.index(constants.COMMAND_END_DELIM)].strip()
+        return message
+    
     # Listen for server input
     def run(self):
         """
@@ -113,9 +123,8 @@ class IRCClient(patterns.Subscriber):
                         self.buffer = self.buffer[message_delim:] # update buffer
 
                         logger.info(f'Client received message from the server {repr(server_message)}')
-                        server_message = server_message[:server_message.index(constants.COMMAND_END_DELIM)]
-                        if constants.COMMAND_NICK_REGISTER_SUCCESS in server_message or constants.COMMAND_NICK_CHANGE_SUCCESS in server_message:
-                            self.nick = server_message[server_message.index('"') + 1:server_message.rindex('"')]
+                        server_message = self.__process_server_message(server_message) # Process msg
+
                         logger.info(f'Displaying response "{server_message}"')
                         self.add_msg(server_message)
 
@@ -131,7 +140,7 @@ class IRCClient(patterns.Subscriber):
 def fetch_server_info(args):
     host = '127.0.0.1'
     port = 6667
-    if(len(args) != 0 and (len(args) != 4 or args[0] != '--server' or args[2] != '--port' or not args[1].isnumeric or not args[3].isnumeric())):
+    if(len(args) != 0 and (len(args) != 4 or args[0] != '--server' or args[2] != '--port' or not args[1].isnumeric() or not args[3].isnumeric())):
         print('Invalid argument list. Usage: irc_client.py [--server SERVER] [--port PORT]')
         sys.exit()
     if(len(args) == 4):
@@ -142,7 +151,7 @@ def fetch_server_info(args):
 def main(args):
     host, port = fetch_server_info(args)
 
-    # Pass your arguments where necessary
+    # Pass args
     client = IRCClient(host, port)
     logger.info(f"Client object created")
 
@@ -172,12 +181,11 @@ def main(args):
         try:
             threading.Thread(target=client.run, args=(), daemon=True).start()
             asyncio.run( inner_run() )
-        except KeyboardInterrupt as e:
+        except KeyboardInterrupt:
             logger.debug(f"Signifies end of process")
     client.close()
 
 if __name__ == "__main__":
-    # Parse your command line arguments here
     main(sys.argv[1:])
 
 

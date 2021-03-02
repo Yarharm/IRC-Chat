@@ -56,10 +56,3 @@ class ServerUtil:
         request = buffered_request[:request_delim]
         return request, request_delim
 
-    # Build response message with '\r\n' and 'encoding'
-    @staticmethod
-    def build_response(message):
-        response = f'{message}{constants.COMMAND_END_DELIM}'
-        response = response.encode(constants.COMMAND_ENCODING)
-        return response
-
