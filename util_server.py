@@ -15,13 +15,6 @@ class ServerUtil:
         request_split = request.split()
         command_type = request_split[1] if constants.COMMAND_PREFIX_DELIM in request_split[0] else request_split[0]
         return command_type
-    
-    # Get prefix from request
-    @staticmethod
-    def get_prefix(request):
-        request_split = request.split()
-        prefix = request_split[0] if constants.COMMAND_PREFIX_DELIM in request_split[0] else ''
-        return prefix
 
     # Extract message from the PRIVMSG request
     @staticmethod
